@@ -3,10 +3,16 @@
 import fs from "fs";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { ChildProcessWithoutNullStreams, exec, execSync, spawn } from "child_process";
+import {
+  ChildProcessWithoutNullStreams,
+  exec,
+  execSync,
+  spawn,
+} from "child_process";
 import { ethers } from "ethers";
 
-const CROSS_CHAIN_CREATE2_FACTORY = "0x0000000000FFe8B47B3e2130213B802212439497";
+const CROSS_CHAIN_CREATE2_FACTORY =
+  "0x0000000000FFe8B47B3e2130213B802212439497";
 
 yargs(hideBin(process.argv))
   .usage("$0 <cmd> [args]")
@@ -23,7 +29,10 @@ yargs(hideBin(process.argv))
         .describe("rpc", "The URL of the RPC to use for deployment")
         .describe("pk", "The private key to use for deployment")
         .describe("salt", "The salt used at deployment. Defaults to 0")
-        .describe("explorer-api-key", "Explorer key for etherscan product on the given network")
+        .describe(
+          "explorer-api-key",
+          "Explorer key for etherscan product on the given network",
+        )
         .array("constructor-args")
         .string("constructor-args")
         .string("pk")
@@ -44,6 +53,29 @@ yargs(hideBin(process.argv))
     },
   )
   .command(
+    "verify <contract>",
+    "verifies the latest deploy of the given contract",
+    (yargs) => {
+      return yargs
+        .positional("contract", {
+          describe: "contract to verify",
+          type: "string",
+          demandOption: "true",
+        })
+        .describe("rpc", "The URL of the RPC to use for deployment")
+        .describe(
+          "explorer-api-key",
+          "Explorer key for etherscan product on the given network",
+        )
+        .string("rpc")
+        .string("explorer-api-key")
+        .demandOption(["rpc", "explorer-api-key"]);
+    },
+    (argv) => {
+      runVerify(argv.contract, argv.rpc, argv["explorer-api-key"]);
+    },
+  )
+  .command(
     "init <chainId>",
     "initialize the deployment file for a given network",
     (yargs) => {
@@ -59,11 +91,29 @@ yargs(hideBin(process.argv))
   )
   .parse();
 
+async function runVerify(
+  contract: string,
+  rpcUrl: string,
+  explorerApiKey: string,
+) {
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const chainId = (await provider.getNetwork()).chainId.toString();
+  const deploymentFile: DeploymentFile = JSON.parse(
+    fs.readFileSync(`deployments/${chainId}.json`, "utf-8"),
+  );
+  const deploy = deploymentFile.contracts[contract].deploys.at(-1);
+  if (!deploy) {
+    throw new Error(`Contract ${contract} has not been deployed yet`);
+  }
+
+  await verifyContract(rpcUrl, explorerApiKey, deploy, contract);
+}
+
 async function runDeploy(
   contract: string,
   rpcUrl: string,
   privateKey: string,
-  constructorArgs: any,
+  constructorArgs: (string | number)[] | undefined,
   salt: string,
   explorerApiKey: string | undefined,
 ) {
@@ -80,9 +130,24 @@ async function runDeploy(
     constructorArgs = resolveConstructorArgs(contract, chainId);
   }
 
-  const encodedConstructorArgs = encodeConstructorArgs(contract, constructorArgs);
+  // Escape constructor arguments with spaces
+  const escapedConstructorArgs = constructorArgs.map((arg) => {
+    if (typeof arg === "string" && arg.includes(" ")) {
+      return `"${arg.replace(/"/g, '\\"')}"`;
+    }
+    return arg;
+  });
+
+  const encodedConstructorArgs = encodeConstructorArgs(
+    contract,
+    constructorArgs,
+  );
   let newDeploy: Deploy = { deployedArgs: encodedConstructorArgs } as Deploy;
-  newDeploy.version = await getUndeployedContractVersion(contract, constructorArgs, rpcUrl);
+  newDeploy.version = await getUndeployedContractVersion(
+    contract,
+    escapedConstructorArgs,
+    rpcUrl,
+  );
 
   validateDeploy(contract, newDeploy, chainId);
 
@@ -91,7 +156,9 @@ async function runDeploy(
   const deploymentBytecode = ethers.solidityPacked(
     ["bytes", "bytes"],
     [
-      JSON.parse(fs.readFileSync(`out/${contract}.sol/${contract}.json`, "utf-8")).bytecode.object,
+      JSON.parse(
+        fs.readFileSync(`out/${contract}.sol/${contract}.json`, "utf-8"),
+      ).bytecode.object,
       encodedConstructorArgs,
     ],
   );
@@ -99,26 +166,53 @@ async function runDeploy(
   const getDeterministicAddressCall = `cast call ${CROSS_CHAIN_CREATE2_FACTORY} "findCreate2Address(bytes32,bytes)" ${salt} ${deploymentBytecode} --rpc-url ${rpcUrl}`;
   const deterministicCreateCall = `cast send ${CROSS_CHAIN_CREATE2_FACTORY} "safeCreate2(bytes32,bytes)" ${salt} ${deploymentBytecode} --rpc-url ${rpcUrl} --private-key ${privateKey}`;
 
-  const getAddrResult = (await execSync(getDeterministicAddressCall)).toString().trim();
-  const addr = ethers.AbiCoder.defaultAbiCoder().decode(["address"], getAddrResult)[0];
+  const getAddrResult = (await execSync(getDeterministicAddressCall))
+    .toString()
+    .trim();
+  const addr = ethers.AbiCoder.defaultAbiCoder().decode(
+    ["address"],
+    getAddrResult,
+  )[0];
   if (addr == ethers.ZeroAddress) {
-    throw new Error(`Contract ${contract} already deployed using salt ${salt} with version ${newDeploy.version}`);
+    throw new Error(
+      `Contract ${contract} already deployed using salt ${salt} with version ${newDeploy.version}`,
+    );
   }
   newDeploy.address = addr;
 
   await execSync(deterministicCreateCall);
-  console.log(`Contract ${contract} deployed to ${newDeploy.address} with version ${newDeploy.version}`);
+  console.log(
+    `Contract ${contract} deployed to ${newDeploy.address} with version ${newDeploy.version}`,
+  );
 
   if (!!explorerApiKey) {
-    const verifyCall = `forge v --rpc-url ${rpcUrl} --etherscan-api-key ${explorerApiKey!} ${
-      encodedConstructorArgs != "" ? `--constructor-args ${encodedConstructorArgs}` : ""
-    } ${newDeploy.address} ${contract}`;
-    console.log(`Verifying ${contract}`);
-    const res = await execSync(verifyCall);
-    console.log(res.toString());
+    await verifyContract(rpcUrl, explorerApiKey, newDeploy, contract);
   }
 
   writeDeploy(contract, newDeploy, chainId);
+}
+
+/**
+ * Verifies the contract on the given networks explorer. Uses forge verify command.
+ * @param rpcUrl
+ * @param explorerApiKey
+ * @param newDeploy
+ * @param contract
+ */
+async function verifyContract(
+  rpcUrl: string,
+  explorerApiKey: string,
+  newDeploy: Deploy,
+  contract: string,
+): Promise<void> {
+  const verifyCall = `forge v --rpc-url ${rpcUrl} --etherscan-api-key ${explorerApiKey!} ${
+    newDeploy.deployedArgs != ""
+      ? `--constructor-args ${newDeploy.deployedArgs}`
+      : ""
+  } ${newDeploy.address} ${contract}`;
+  console.log(`Verifying ${contract}`);
+  const res = await execSync(verifyCall);
+  console.log(res.toString());
 }
 
 /**
@@ -126,11 +220,16 @@ async function runDeploy(
  * @param contractName Contract to resolve args for
  * @param chainId Chain to deploy to
  */
-function resolveConstructorArgs(contractName: string, chainId: string): string[] {
+function resolveConstructorArgs(
+  contractName: string,
+  chainId: string,
+): string[] {
   if (!fs.existsSync(`deployments/${chainId}.json`)) {
     throw new Error(`Deployment file for network ${chainId} does not exist`);
   }
-  const deploymentFile: DeploymentFile = JSON.parse(fs.readFileSync(`deployments/${chainId}.json`, "utf-8"));
+  const deploymentFile: DeploymentFile = JSON.parse(
+    fs.readFileSync(`deployments/${chainId}.json`, "utf-8"),
+  );
 
   if (!(contractName in deploymentFile.contracts)) {
     throw new Error(`Contract ${contractName} does not exist in project`);
@@ -143,14 +242,17 @@ function resolveConstructorArgs(contractName: string, chainId: string): string[]
   for (let i = 0; i < args.length; i++) {
     if (args[i] in deploymentFile.contracts) {
       const contractObj = deploymentFile.contracts[args[i]];
-      if (contractObj.deploys.length == 0) throw new Error(`Contract ${args[i]} doesn't have any deploy`);
+      if (contractObj.deploys.length == 0)
+        throw new Error(`Contract ${args[i]} doesn't have any deploy`);
       resolvedArgs[i] = contractObj.deploys.at(-1)!.address;
     } else {
       // Must be in constants or revert
       if (args[i] in deploymentFile.constants) {
         resolvedArgs[i] = deploymentFile.constants[args[i]];
       } else {
-        throw new Error(`Argument ${args[i]} not found in deployment file or constants`);
+        throw new Error(
+          `Argument ${args[i]} not found in deployment file or constants`,
+        );
       }
     }
   }
@@ -169,11 +271,14 @@ function validateDeploy(contract: string, deploy: Deploy, chainId: string) {
   if (!fs.existsSync(`deployments/${chainId}.json`)) {
     initProject(chainId);
   }
-  const existingDeployments = JSON.parse(fs.readFileSync(`deployments/${chainId}.json`, "utf-8"));
+  const existingDeployments = JSON.parse(
+    fs.readFileSync(`deployments/${chainId}.json`, "utf-8"),
+  );
 
   if (
     !!existingDeployments.contracts[contract].deploys.find(
-      (d: Deploy) => d.version == deploy.version && d.deployedArgs == deploy.deployedArgs,
+      (d: Deploy) =>
+        d.version == deploy.version && d.deployedArgs == deploy.deployedArgs,
     )
   ) {
     throw new Error(
@@ -195,9 +300,14 @@ function writeDeploy(contract: string, deploy: Deploy, chainId: string) {
   if (!fs.existsSync(`deployments/${chainId}.json`)) {
     initProject(chainId);
   }
-  const existingDeployments = JSON.parse(fs.readFileSync(`deployments/${chainId}.json`, "utf-8"));
+  const existingDeployments = JSON.parse(
+    fs.readFileSync(`deployments/${chainId}.json`, "utf-8"),
+  );
   existingDeployments.contracts[contract].deploys.push(deploy);
-  fs.writeFileSync(`deployments/${chainId}.json`, JSON.stringify(existingDeployments));
+  fs.writeFileSync(
+    `deployments/${chainId}.json`,
+    JSON.stringify(existingDeployments),
+  );
 }
 
 /**
@@ -205,8 +315,15 @@ function writeDeploy(contract: string, deploy: Deploy, chainId: string) {
  * @param rpcUrl RPC to use as a fork for the local anvil instance
  * @returns Returns the child process. Must be killed.
  */
-async function launchAnvil(rpcUrl: string): Promise<ChildProcessWithoutNullStreams> {
-  var anvil = spawn("anvil", ["--mnemonic-seed-unsafe", "123", "--fork-url", rpcUrl]);
+async function launchAnvil(
+  rpcUrl: string,
+): Promise<ChildProcessWithoutNullStreams> {
+  var anvil = spawn("anvil", [
+    "--mnemonic-seed-unsafe",
+    "123",
+    "--fork-url",
+    rpcUrl,
+  ]);
   return new Promise((resolve) => {
     anvil.stdout.on("data", function (data) {
       if (data.includes("Listening")) {
@@ -234,7 +351,9 @@ async function getUndeployedContractVersion(
 
   // Private key generated from mnemonic 123
   const createCommand = `forge create ${contractName} --private-key 0x78427d179c2c0f8467881bc37f9453a99854977507ca53ff65e1c875208a4a03 --rpc-url "127.0.0.1:8545" ${
-    !!constructorArgs && constructorArgs.length != 0 ? "--constructor-args " + constructorArgs.join(" ") : ""
+    !!constructorArgs && constructorArgs.length != 0
+      ? "--constructor-args " + constructorArgs.join(" ")
+      : ""
   }`;
   let addr = "";
 
@@ -259,19 +378,32 @@ async function getUndeployedContractVersion(
  * @param rpcUrl RPC to connect to the network where the contract is deployed
  * @returns
  */
-async function getContractVersion(contractAddress: string, rpcUrl: string): Promise<string> {
+async function getContractVersion(
+  contractAddress: string,
+  rpcUrl: string,
+): Promise<string> {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   try {
-    const versionRes = await provider.call({ to: contractAddress, data: "0xffa1ad74" /* Version function */ });
+    const versionRes = await provider.call({
+      to: contractAddress,
+      data: "0xffa1ad74" /* Version function */,
+    });
     return ethers.AbiCoder.defaultAbiCoder().decode(["string"], versionRes)[0];
   } catch (err) {
-    throw new Error("Contract does not implement version function. Please implement `VERSION` in your contract");
+    throw new Error(
+      "Contract does not implement version function. Please implement `VERSION` in your contract",
+    );
   }
 }
 
-function encodeConstructorArgs(contractName: string, args: string[] | undefined): string {
+function encodeConstructorArgs(
+  contractName: string,
+  args: (string | number)[] | undefined,
+): string {
   if (!!args) {
-    const contractABI = JSON.parse(fs.readFileSync(`out/${contractName}.sol/${contractName}.json`, "utf-8")).abi;
+    const contractABI = JSON.parse(
+      fs.readFileSync(`out/${contractName}.sol/${contractName}.json`, "utf-8"),
+    ).abi;
     const contractInterface = new ethers.Interface(contractABI);
     return contractInterface.encodeDeploy(args);
   }
@@ -329,15 +461,24 @@ function initProject(chainId: string) {
 function getProjectContracts(): string[] {
   console.log("Building project...");
   execSync("forge build");
-  const buildCache = JSON.parse(fs.readFileSync("cache/solidity-files-cache.json", "utf-8"));
+  const buildCache = JSON.parse(
+    fs.readFileSync("cache/solidity-files-cache.json", "utf-8"),
+  );
   // Get files in src directory
-  const filesOfInterest = Object.keys(buildCache.files).filter((file: string) => file.startsWith("src/"));
+  const filesOfInterest = Object.keys(buildCache.files).filter((file: string) =>
+    file.startsWith("src/"),
+  );
 
   // Get contracts that have bytecode
   let deployableContracts: string[] = [];
   for (const file of filesOfInterest) {
     const fileName = file.split("/").pop()!;
-    const buildOutput = JSON.parse(fs.readFileSync(`out/${fileName}/${fileName.split(".")[0]}.json`, "utf-8"));
+    const buildOutput = JSON.parse(
+      fs.readFileSync(
+        `out/${fileName}/${fileName.split(".")[0]}.json`,
+        "utf-8",
+      ),
+    );
     // Only consider contracts that are deployable
     if (buildOutput.bytecode.object !== "0x") {
       deployableContracts.push(fileName.split(".")[0]);

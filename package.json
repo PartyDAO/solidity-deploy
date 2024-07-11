@@ -1,6 +1,6 @@
 {
   "name": "@partydao/solidity-deploy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "bin": {
     "solidity-deploy": "./dist/deploy.js"
   },
@@ -12,13 +12,16 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.5",
-    "@types/yargs": "^17.0.32"
+    "@types/yargs": "^17.0.32",
+    "prettier": "^3.3.2"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "prettier:check": "prettier --check \"**/*.{json,ts}\" --ignore-path \".prettierignore\"",
+    "prettier:write": "prettier --write \"**/*.{json,ts}\" --ignore-path \".prettierignore\""
   },
   "repository": {
     "type": "git",
