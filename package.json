@@ -1,6 +1,6 @@
 {
   "name": "@partydao/solidity-deploy",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "bin": {
     "solidity-deploy": "./dist/deploy.js"
   },
