@@ -130,28 +130,11 @@ async function runDeploy(
     constructorArgs = resolveConstructorArgs(contract, chainId);
   }
 
-  // Escape constructor arguments with spaces
-  const escapedConstructorArgs = constructorArgs.map((arg) => {
-    if (typeof arg === "string" && arg.includes(" ")) {
-      return `"${arg.replace(/"/g, '\\"')}"`;
-    }
-    return arg;
-  });
-
   const encodedConstructorArgs = encodeConstructorArgs(
     contract,
     constructorArgs,
   );
   let newDeploy: Deploy = { deployedArgs: encodedConstructorArgs } as Deploy;
-  newDeploy.version = await getUndeployedContractVersion(
-    contract,
-    escapedConstructorArgs,
-    rpcUrl,
-  );
-
-  validateDeploy(contract, newDeploy, chainId);
-
-  console.log("Deploying contract...");
 
   const deploymentBytecode = ethers.solidityPacked(
     ["bytes", "bytes"],
@@ -162,6 +145,14 @@ async function runDeploy(
       encodedConstructorArgs,
     ],
   );
+  newDeploy.version = await getUndeployedContractVersion(
+    deploymentBytecode,
+    rpcUrl,
+  );
+
+  validateDeploy(contract, newDeploy, chainId);
+
+  console.log("Deploying contract...");
 
   const getDeterministicAddressCall = `cast call ${CROSS_CHAIN_CREATE2_FACTORY} "findCreate2Address(bytes32,bytes)" ${salt} ${deploymentBytecode} --rpc-url ${rpcUrl}`;
   const deterministicCreateCall = `cast send ${CROSS_CHAIN_CREATE2_FACTORY} "safeCreate2(bytes32,bytes)" ${salt} ${deploymentBytecode} --rpc-url ${rpcUrl} --private-key ${privateKey}`;
@@ -338,33 +329,20 @@ async function launchAnvil(
 
 /**
  * Gets the version of an undeployed contract via deploying to a local network.
- * @param contractName Name of the contract in the repo
+ * @param deploymentBytecode Bytecode to use for deploying the contract. Includes constructor args.
  * @param rpcUrl The RPC url to fork the local node off of
- * @returns
+ * @returns version
  */
 async function getUndeployedContractVersion(
-  contractName: string,
-  constructorArgs: any,
+  deploymentBytecode: string,
   rpcUrl: string,
 ): Promise<string> {
   const anvil = await launchAnvil(rpcUrl);
 
   // Private key generated from mnemonic 123
-  const createCommand = `forge create ${contractName} --private-key 0x78427d179c2c0f8467881bc37f9453a99854977507ca53ff65e1c875208a4a03 --rpc-url "127.0.0.1:8545" ${
-    !!constructorArgs && constructorArgs.length != 0
-      ? "--constructor-args " + constructorArgs.join(" ")
-      : ""
-  }`;
-  let addr = "";
-
-  const out = await execSync(createCommand);
-  const lines = out.toString().split("\n");
-  for (const line of lines) {
-    if (line.startsWith("Deployed to: ")) {
-      // Get the address
-      addr = line.split("Deployed to: ")[1];
-    }
-  }
+  const createCommand = `cast send --private-key 0x78427d179c2c0f8467881bc37f9453a99854977507ca53ff65e1c875208a4a03 --rpc-url "127.0.0.1:8545" --create ${deploymentBytecode}`;
+  let addr = "0xC1e3efbd87a483129360a2196c09188D73fA1c6C"; // Address of contract will alway be this
+  await execSync(createCommand);
 
   const res = await getContractVersion(addr, "http://127.0.0.1:8545");
   anvil.kill();
