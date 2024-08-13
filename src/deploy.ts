@@ -383,7 +383,15 @@ function encodeConstructorArgs(
       fs.readFileSync(`out/${contractName}.sol/${contractName}.json`, "utf-8"),
     ).abi;
     const contractInterface = new ethers.Interface(contractABI);
-    return contractInterface.encodeDeploy(args);
+    let encodedArgs = "";
+    try {
+      encodedArgs = contractInterface.encodeDeploy(args);
+    } catch (e) {
+      throw new Error(
+        `Error encoding constructor arguments for contract ${contractName}. ${e}`,
+      );
+    }
+    return encodedArgs;
   }
   return "";
 }
