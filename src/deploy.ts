@@ -10,6 +10,7 @@ import {
   spawn,
 } from "child_process";
 import { ethers } from "ethers";
+import crypto from "crypto";
 
 const CROSS_CHAIN_CREATE2_FACTORY =
   "0x0000000000FFe8B47B3e2130213B802212439497";
@@ -150,6 +151,27 @@ async function runDeploy(
     rpcUrl,
   );
 
+  newDeploy.bytecodeHash = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify(
+        JSON.parse(
+          fs.readFileSync(`out/${contract}.sol/${contract}.json`, "utf-8"),
+        ).bytecode.object,
+      ),
+    )
+    .digest("hex");
+  newDeploy.abiHash = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify(
+        JSON.parse(
+          fs.readFileSync(`out/${contract}.sol/${contract}.json`, "utf-8"),
+        ).abi,
+      ),
+    )
+    .digest("hex");
+
   validateDeploy(contract, newDeploy, chainId);
 
   console.log("Deploying contract...");
@@ -278,6 +300,28 @@ function validateDeploy(contract: string, deploy: Deploy, chainId: string) {
       } already deployed`,
     );
   }
+
+  // Validate deploy version
+  if (existingDeployments.contracts[contract].deploys.length != 0) {
+    const latestDeploy: Deploy =
+      existingDeployments.contracts[contract].deploys.at(-1);
+
+    if (latestDeploy.abiHash != deploy.abiHash) {
+      const expectedVersion = `${Number(latestDeploy.version.split(".")[0]) + 1}.0.0`;
+      if (expectedVersion != deploy.version) {
+        throw new Error(
+          `Contract ${contract} version ${deploy.version} must increment major version due to ABI change. Expected version is ${expectedVersion}.`,
+        );
+      }
+    } else if (latestDeploy.bytecodeHash != deploy.bytecodeHash) {
+      const expectedVersion = `${latestDeploy.version.split(".")[0]}.${Number(latestDeploy.version.split(".")[1]) + 1}.0`;
+      if (expectedVersion != deploy.version) {
+        throw new Error(
+          `Contract ${contract} version ${deploy.version} must increment minor version due to bytecode change. Expected version is ${expectedVersion}.`,
+        );
+      }
+    }
+  }
 }
 
 /**
@@ -400,6 +444,8 @@ type Deploy = {
   version: string;
   address: string;
   deployedArgs: string;
+  abiHash: string;
+  bytecodeHash: string;
 };
 type Contract = {
   deploys: Deploy[];
