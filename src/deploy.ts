@@ -137,14 +137,12 @@ async function runDeploy(
   );
   let newDeploy: Deploy = { deployedArgs: encodedConstructorArgs } as Deploy;
 
+  const contractJson = JSON.parse(
+    fs.readFileSync(`out/${contract}.sol/${contract}.json`, "utf-8")
+  );
   const deploymentBytecode = ethers.solidityPacked(
     ["bytes", "bytes"],
-    [
-      JSON.parse(
-        fs.readFileSync(`out/${contract}.sol/${contract}.json`, "utf-8"),
-      ).bytecode.object,
-      encodedConstructorArgs,
-    ],
+    [contractJson.bytecode.object, encodedConstructorArgs]
   );
   newDeploy.version = await getUndeployedContractVersion(
     deploymentBytecode,
@@ -153,24 +151,23 @@ async function runDeploy(
 
   newDeploy.bytecodeHash = crypto
     .createHash("sha256")
-    .update(
-      JSON.stringify(
-        JSON.parse(
-          fs.readFileSync(`out/${contract}.sol/${contract}.json`, "utf-8"),
-        ).bytecode.object,
-      ),
-    )
+    .update(JSON.stringify(contractJson.bytecode.object))
     .digest("hex");
   newDeploy.abiHash = crypto
     .createHash("sha256")
-    .update(
-      JSON.stringify(
-        JSON.parse(
-          fs.readFileSync(`out/${contract}.sol/${contract}.json`, "utf-8"),
-        ).abi,
-      ),
-    )
+    .update(JSON.stringify(contractJson.abi))
     .digest("hex");
+  newDeploy.commitHash = getLatestCommitHash();
+
+  // Store ABI file
+  const abiDir = `deployments/abi/${contract}`;
+  if (!fs.existsSync(abiDir)) {
+    fs.mkdirSync(abiDir, { recursive: true });
+  }
+  fs.writeFileSync(
+    `${abiDir}/v${newDeploy.version.replace(/\./g, "_")}.json`,
+    JSON.stringify(contractJson.abi, null, 2),
+  );
 
   validateDeploy(contract, newDeploy, chainId);
 
@@ -195,7 +192,7 @@ async function runDeploy(
 
   await execSync(deterministicCreateCall);
   console.log(
-    `Contract ${contract} deployed to ${newDeploy.address} with version ${newDeploy.version}`,
+    `Contract ${contract} deployed to ${newDeploy.address} with version ${newDeploy.version} (commit ${newDeploy.commitHash})`,
   );
 
   if (!!explorerApiKey) {
@@ -445,6 +442,7 @@ type Deploy = {
   address: string;
   deployedArgs: string;
   abiHash: string;
+  commitHash: string;
   bytecodeHash: string;
 };
 type Contract = {
@@ -518,4 +516,17 @@ function getProjectContracts(): string[] {
   }
 
   return deployableContracts;
+}
+
+/**
+ * Gets the latest commit hash
+ * @returns Commit hash
+ */
+function getLatestCommitHash(): string {
+  try {
+    return execSync("git rev-parse HEAD").toString().trim();
+  } catch (error) {
+    console.warn("Unable to get git commit hash. Is this a git repository?");
+    return "unknown";
+  }
 }
