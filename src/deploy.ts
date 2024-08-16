@@ -11,6 +11,8 @@ import {
 } from "child_process";
 import { ethers } from "ethers";
 import crypto from "crypto";
+import * as diff from "diff";
+import axios from "axios";
 
 const CROSS_CHAIN_CREATE2_FACTORY =
   "0x0000000000FFe8B47B3e2130213B802212439497";
@@ -34,12 +36,16 @@ yargs(hideBin(process.argv))
           "explorer-api-key",
           "Explorer key for etherscan product on the given network",
         )
+        .describe("discord-webhook-url", "Discord webhook URL for notifications")
+        .describe("github-token", "GitHub token for creating gists")
         .array("constructor-args")
         .string("constructor-args")
         .string("pk")
         .string("rpc")
         .string("salt")
         .string("explorer-api-key")
+        .string("discord-webhook-url")
+        .string("github-token")
         .demandOption(["rpc", "pk"]);
     },
     (argv) => {
@@ -50,6 +56,8 @@ yargs(hideBin(process.argv))
         argv["constructor-args"],
         argv.salt ?? ethers.ZeroHash,
         argv.explorerApiKey,
+        argv.discordWebhookUrl,
+        argv.githubToken
       );
     },
   )
@@ -117,6 +125,8 @@ async function runDeploy(
   constructorArgs: (string | number)[] | undefined,
   salt: string,
   explorerApiKey: string | undefined,
+  discordWebhookUrl: string | undefined,
+  githubToken: string | undefined
 ) {
   const contracts = getProjectContracts();
   if (!contracts.includes(contract)) {
@@ -159,15 +169,22 @@ async function runDeploy(
     .digest("hex");
   newDeploy.commitHash = getLatestCommitHash();
 
-  // Store ABI file
+  // Store ABI file and generate diff
   const abiDir = `deployments/abi/${contract}`;
   if (!fs.existsSync(abiDir)) {
     fs.mkdirSync(abiDir, { recursive: true });
   }
-  fs.writeFileSync(
-    `${abiDir}/v${newDeploy.version.replace(/\./g, "_")}.json`,
-    JSON.stringify(contractJson.abi, null, 2),
-  );
+  const newAbiPath = `${abiDir}/v${newDeploy.version.replace(/\./g, "_")}.json`;
+  if (!fs.existsSync(newAbiPath)) {
+    fs.writeFileSync(newAbiPath, JSON.stringify(contractJson.abi, null, 2));
+    if (discordWebhookUrl && githubToken) {
+      await notifyAbiChanges(contract, newDeploy.version, chainId, newDeploy.address, discordWebhookUrl, githubToken);
+    } else {
+      console.log("Skipping ABI change notification: GitHub token or Discord webhook URL not provided.");
+    }
+  } else {
+    console.log(`No new ABI changes detected for ${contract}. Skipping diff generation and Discord notification.`);
+  }
 
   validateDeploy(contract, newDeploy, chainId);
 
@@ -528,5 +545,140 @@ function getLatestCommitHash(): string {
   } catch (error) {
     console.warn("Unable to get git commit hash. Is this a git repository?");
     return "unknown";
+  }
+}
+
+/**
+ * Notifies the team of ABI changes via Discord
+ * @param contract Name of the contract
+ * @param newVersion New version of the contract
+ * @param chainId Chain ID of the network
+ * @param contractAddress Address of the contract
+ */
+async function notifyAbiChanges(
+  contract: string,
+  newVersion: string,
+  chainId: string,
+  contractAddress: string,
+  discordWebhookUrl: string,
+  githubToken: string
+) {
+  newVersion = newVersion.startsWith("v") ? newVersion : `v${newVersion}`;
+
+  const abiDir = `deployments/abi/${contract}`;
+  const files = fs.readdirSync(abiDir).sort();
+
+  if (files.length < 2) {
+    console.log(`No previous version found for ${contract}. Skipping diff generation and notification.`);
+    return;
+  }
+
+  const newAbiPath = `${abiDir}/${newVersion.replace(/\./g, "_")}.json`;
+  const previousAbiPath = `${abiDir}/${files[files.length - 2]}`;
+
+  const newAbi = JSON.parse(fs.readFileSync(newAbiPath, "utf-8"));
+  const previousAbi = JSON.parse(fs.readFileSync(previousAbiPath, "utf-8"));
+
+  const differences = diff.diffJson(previousAbi, newAbi);
+  const oldVersion = files[files.length - 2].split(".")[0].replace(/\_/g, ".");
+
+  let detailedDiff = "";
+  differences.forEach((part) => {
+    const prefix = part.added ? "+" : part.removed ? "-" : " ";
+    const lines = part.value
+      .split("\n")
+      .map((line) => `${prefix} ${line}`)
+      .join("\n");
+    detailedDiff += lines + "\n";
+  });
+
+  // Upload to GitHub Gist and send Discord message
+  try {
+    const description = `The ABI changes for ${contract}.sol between ${oldVersion} and ${newVersion}.`;
+    const gistUrl = await uploadToGist(detailedDiff, `${contract}_ABI_${oldVersion}_to_${newVersion}.diff`, description, githubToken);
+    console.log(`ABI diff for ${contract} uploaded to: ${gistUrl}`);
+
+    await sendDiscordMessage(contract, oldVersion, newVersion, gistUrl, chainId, contractAddress, discordWebhookUrl);
+  } catch (error) {
+    console.error("Error in notifying ABI changes:", error);
+  }
+}
+
+async function uploadToGist(content: string, filename: string, description: string, githubToken: string): Promise<string> {
+  try {
+    const response = await axios.post(
+      "https://api.github.com/gists",
+      {
+        files: {
+          [filename]: {
+            content: content,
+          },
+        },
+        description,
+        public: false,
+      },
+      {
+        headers: {
+          Authorization: `token ${githubToken}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      },
+    );
+
+    return response.data.html_url;
+  } catch (error) {
+    console.error("Error uploading to GitHub Gist:", error);
+    throw error;
+  }
+}
+
+async function sendDiscordMessage(
+  contract: string,
+  oldVersion: string,
+  newVersion: string,
+  gistUrl: string,
+  chainId: string,
+  contractAddress: string,
+  discordWebhookUrl: string
+) {
+  const message = {
+    embeds: [
+      {
+        title: `ABI Changes: ${contract} ${oldVersion} → ${newVersion}`,
+        description: `A new version of \`${contract}.sol\` with ABI changes has been deployed.`,
+        color: 3447003,
+        fields: [
+          {
+            name: "Version",
+            value: `${oldVersion} → ${newVersion}`,
+          },
+          {
+            name: "Chain ID",
+            value: `${chainId}`,
+          },
+          {
+            name: "Address",
+            value: `${contractAddress}`,
+          },
+          {
+            name: "ABI Changes",
+            value: `[View diff on GitHub](${gistUrl})`,
+          },
+        ],
+      },
+    ],
+  };
+
+  try {
+    const response = await axios.post(discordWebhookUrl, message);
+    console.log(`Discord message sent for ${contract} ABI changes.`);
+    return response.data;
+  } catch (error) {
+    console.error(
+      "Error sending Discord message:",
+      axios.isAxiosError(error) && error.response
+        ? `${error.response.status} ${error.response.statusText}\nResponse data: ${JSON.stringify(error.response.data)}`
+        : error,
+    );
   }
 }

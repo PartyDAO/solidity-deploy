@@ -11,8 +11,11 @@
     "yargs": "^17.7.2"
   },
   "devDependencies": {
+    "@types/diff": "^5.2.1",
     "@types/node": "^20.14.5",
     "@types/yargs": "^17.0.32",
+    "axios": "^1.7.4",
+    "diff": "^5.2.0",
     "prettier": "^3.3.3"
   },
   "files": [
