@@ -46,6 +46,9 @@ yargs(hideBin(process.argv))
         .string("explorer-api-key")
         .string("discord-webhook-url")
         .string("github-token")
+        .boolean("store-abi")
+        .describe("store-abi", "Store the ABI file for the deployed contract")
+        .default("store-abi", false)
         .demandOption(["rpc", "pk"]);
     },
     (argv) => {
@@ -57,7 +60,8 @@ yargs(hideBin(process.argv))
         argv.salt ?? ethers.ZeroHash,
         argv.explorerApiKey,
         argv.discordWebhookUrl,
-        argv.githubToken
+        argv.githubToken,
+        argv.storeAbi
       );
     },
   )
@@ -126,7 +130,8 @@ async function runDeploy(
   salt: string,
   explorerApiKey: string | undefined,
   discordWebhookUrl: string | undefined,
-  githubToken: string | undefined
+  githubToken: string | undefined,
+  storeAbi: boolean
 ) {
   const contracts = getProjectContracts();
   if (!contracts.includes(contract)) {
@@ -169,21 +174,25 @@ async function runDeploy(
     .digest("hex");
   newDeploy.commitHash = getLatestCommitHash();
 
-  // Store ABI file and generate diff
-  const abiDir = `deployments/abi/${contract}`;
-  if (!fs.existsSync(abiDir)) {
-    fs.mkdirSync(abiDir, { recursive: true });
-  }
-  const newAbiPath = `${abiDir}/v${newDeploy.version.replace(/\./g, "_")}.json`;
-  if (!fs.existsSync(newAbiPath)) {
-    fs.writeFileSync(newAbiPath, JSON.stringify(contractJson.abi, null, 2));
-    if (discordWebhookUrl && githubToken) {
-      await notifyAbiChanges(contract, newDeploy.version, chainId, newDeploy.address, discordWebhookUrl, githubToken);
+  if (storeAbi) {
+    // Store ABI file and generate diff
+    const abiDir = `deployments/abi/${contract}`;
+    if (!fs.existsSync(abiDir)) {
+      fs.mkdirSync(abiDir, { recursive: true });
+    }
+    const newAbiPath = `${abiDir}/v${newDeploy.version.replace(/\./g, "_")}.json`;
+    if (!fs.existsSync(newAbiPath)) {
+      fs.writeFileSync(newAbiPath, JSON.stringify(contractJson.abi, null, 2));
+      if (discordWebhookUrl && githubToken) {
+        await notifyAbiChanges(contract, newDeploy.version, chainId, newDeploy.address, discordWebhookUrl, githubToken);
+      } else {
+        console.log("Skipping ABI change notification: GitHub token or Discord webhook URL not provided.");
+      }
     } else {
-      console.log("Skipping ABI change notification: GitHub token or Discord webhook URL not provided.");
+      console.log(`No new ABI changes detected for ${contract}. Skipping diff generation and Discord notification.`);
     }
   } else {
-    console.log(`No new ABI changes detected for ${contract}. Skipping diff generation and Discord notification.`);
+    console.log("Skipping writing ABIs.");
   }
 
   validateDeploy(contract, newDeploy, chainId);
