@@ -261,7 +261,7 @@ function resolveConstructorArgs(
   chainId: string,
 ): string[] {
   if (!fs.existsSync(`deployments/${chainId}.json`)) {
-    throw new Error(`Deployment file for network ${chainId} does not exist`);
+    throw new Error(`Deployment file for network ${getNetworkName(chainId)} does not exist`);
   }
   const deploymentFile: DeploymentFile = JSON.parse(
     fs.readFileSync(`deployments/${chainId}.json`, "utf-8"),
@@ -488,7 +488,7 @@ function initProject(chainId: string) {
   console.log(`Initializing project for network ${chainId}...`);
 
   if (fs.existsSync(`deployments/${chainId}.json`)) {
-    throw new Error(`Deployment file for network ${chainId} already exists`);
+    throw new Error(`Deployment file for network ${getNetworkName(chainId)} already exists`);
   }
 
   let fileToStore: DeploymentFile = {
@@ -662,8 +662,8 @@ async function sendDiscordMessage(
             value: `${oldVersion} → ${newVersion}`,
           },
           {
-            name: "Chain ID",
-            value: `${chainId}`,
+            name: "Chain",
+            value: `${getNetworkName(chainId)}`,
           },
           {
             name: "Address",
@@ -689,5 +689,24 @@ async function sendDiscordMessage(
         ? `${error.response.status} ${error.response.statusText}\nResponse data: ${JSON.stringify(error.response.data)}`
         : error,
     );
+  }
+}
+
+function getNetworkName(chainId: string): string {
+  switch (chainId) {
+    case "1":
+      return "Mainnet";
+    case "11155111":
+      return "Sepolia";
+    case "8453":
+      return "Base";
+    case "84532":
+      return "Base Sepolia";
+    case "7777777":
+      return "Zora";
+    case "1337":
+      return "Localhost";
+    default:
+      return chainId.toString();
   }
 }
