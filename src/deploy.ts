@@ -184,13 +184,30 @@ async function runDeploy(
     const newAbiPath = `${abiDir}/v${newDeploy.version.replace(/\./g, "_")}.json`;
     if (!fs.existsSync(newAbiPath)) {
       fs.writeFileSync(newAbiPath, JSON.stringify(contractJson.abi, null, 2));
-      if (webhookUrl && githubToken) {
-        await notifyAbiChanges(contract, newDeploy.version, chainId, newDeploy.address, webhookUrl, githubToken);
+
+      // Check if there's a previous version
+      const previousVersions = sortVersions(fs.readdirSync(abiDir));
+
+      if (previousVersions.length > 1) {
+        const previousAbiPath = `${abiDir}/${previousVersions[1]}`;
+        const newAbi = JSON.parse(fs.readFileSync(newAbiPath, 'utf-8'));
+        const previousAbi = JSON.parse(fs.readFileSync(previousAbiPath, 'utf-8'));
+
+        if (JSON.stringify(newAbi) !== JSON.stringify(previousAbi)) {
+          if (webhookUrl && githubToken) {
+            const previousVersion = previousVersions[1].split(".")[0].replace(/\_/g, ".");
+            await notifyAbiChanges(contract, previousVersion, newDeploy.version, previousAbi, newAbi, chainId, newDeploy.address, webhookUrl, githubToken);
+          } else {
+            console.log("Skipping ABI change notification: GitHub token or webhook URL not provided.");
+          }
+        } else {
+          console.log(`No ABI changes detected for ${contract}. Skipping diff generation and webhook notification.`);
+        }
       } else {
-        console.log("Skipping ABI change notification: GitHub token or webhook URL not provided.");
+        console.log(`First version of ABI for ${contract}. Skipping diff generation and webhook notification.`);
       }
     } else {
-      console.log(`No new ABI changes detected for ${contract}. Skipping diff generation and webhook notification.`);
+      console.log(`ABI file already exists for ${contract} v${newDeploy.version}. Skipping writing and notification.`);
     }
   } else {
     console.log("Skipping writing ABIs.");
@@ -561,40 +578,25 @@ function getLatestCommitHash(): string {
 /**
  * Notifies the team of ABI changes via webhook
  * @param contract Name of the contract
+ * @param previousVersion Previous version of the contract
  * @param newVersion New version of the contract
+ * @param previousAbi Previous ABI in JSON of the contract
+ * @param newAbi New ABI in JSON of the contract
  * @param chainId Chain ID of the network
  * @param contractAddress Address of the contract
  */
 async function notifyAbiChanges(
   contract: string,
+  previousVersion: string,
   newVersion: string,
+  previousAbi: string,
+  newAbi: string,
   chainId: string,
   contractAddress: string,
   webhookUrl: string,
   githubToken: string
 ) {
-  newVersion = newVersion.startsWith("v") ? newVersion : `v${newVersion}`;
-
-  const abiDir = `deployments/abi/${contract}`;
-  const files = fs.readdirSync(abiDir).sort((a, b) => {
-    const versionA = a.replace(/^v/, '').replace(/\_/g, '.');
-    const versionB = b.replace(/^v/, '').replace(/\_/g, '.');
-    return semver.compare(versionA, versionB);
-  });
-
-  if (files.length < 2) {
-    console.log(`No previous version found for ${contract}. Skipping diff generation and notification.`);
-    return;
-  }
-
-  const newAbiPath = `${abiDir}/${newVersion.replace(/\./g, "_")}.json`;
-  const previousAbiPath = `${abiDir}/${files[files.length - 2]}`;
-
-  const newAbi = JSON.parse(fs.readFileSync(newAbiPath, "utf-8"));
-  const previousAbi = JSON.parse(fs.readFileSync(previousAbiPath, "utf-8"));
-
   const differences = diff.diffJson(previousAbi, newAbi);
-  const oldVersion = files[files.length - 2].split(".")[0].replace(/\_/g, ".");
 
   let detailedDiff = "";
   differences.forEach((part) => {
@@ -608,11 +610,11 @@ async function notifyAbiChanges(
 
   // Upload to GitHub Gist and send webhook message
   try {
-    const description = `The ABI changes for ${contract}.sol between ${oldVersion} and ${newVersion}.`;
-    const gistUrl = await uploadToGist(detailedDiff, `${contract}_ABI_${oldVersion}_to_${newVersion}.diff`, description, githubToken);
+    const description = `The ABI changes for ${contract}.sol between ${previousVersion} and ${newVersion}.`;
+    const gistUrl = await uploadToGist(detailedDiff, `${contract}_ABI_${previousVersion}_to_${newVersion}.diff`, description, githubToken);
     console.log(`ABI diff for ${contract} uploaded to: ${gistUrl}`);
 
-    await sendWebhookMessage(contract, oldVersion, newVersion, gistUrl, chainId, contractAddress, webhookUrl);
+    await sendWebhookMessage(contract, previousVersion, newVersion, gistUrl, chainId, contractAddress, webhookUrl);
   } catch (error) {
     console.error("Error in notifying ABI changes:", error);
   }
@@ -648,7 +650,7 @@ async function uploadToGist(content: string, filename: string, description: stri
 
 async function sendWebhookMessage(
   contract: string,
-  oldVersion: string,
+  previousVersion: string,
   newVersion: string,
   gistUrl: string,
   chainId: string,
@@ -658,13 +660,13 @@ async function sendWebhookMessage(
   const message = {
     embeds: [
       {
-        title: `ABI Changes: ${contract} ${oldVersion} → ${newVersion}`,
+        title: `ABI Changes: ${contract} ${previousVersion} → ${newVersion}`,
         description: `A new version of \`${contract}.sol\` with ABI changes has been deployed.`,
         color: 3447003,
         fields: [
           {
             name: "Version",
-            value: `${oldVersion} → ${newVersion}`,
+            value: `${previousVersion} → ${newVersion}`,
           },
           {
             name: "Chain",
@@ -714,4 +716,12 @@ function getNetworkName(chainId: string): string {
     default:
       return chainId.toString();
   }
+}
+
+function sortVersions(versions: string[]): string[] {
+  return versions.sort((a, b) => {
+    const versionA = a.replace(/^v/, '').replace(/\_/g, '.');
+    const versionB = b.replace(/^v/, '').replace(/\_/g, '.');
+    return semver.compare(versionB, versionA); // Descending order
+  });
 }
