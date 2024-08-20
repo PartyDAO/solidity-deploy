@@ -37,7 +37,7 @@ yargs(hideBin(process.argv))
           "explorer-api-key",
           "Explorer key for etherscan product on the given network",
         )
-        .describe("discord-webhook-url", "Discord webhook URL for notifications")
+        .describe("webhook-url", "Webhook URL for notifications")
         .describe("github-token", "GitHub token for creating gists")
         .describe("store-abi", "Store the ABI file for the deployed contract")
         .array("constructor-args")
@@ -46,7 +46,7 @@ yargs(hideBin(process.argv))
         .string("rpc")
         .string("salt")
         .string("explorer-api-key")
-        .string("discord-webhook-url")
+        .string("webhook-url")
         .string("github-token")
         .boolean("store-abi")
         .default("store-abi", false)
@@ -60,7 +60,7 @@ yargs(hideBin(process.argv))
         argv["constructor-args"],
         argv.salt ?? ethers.ZeroHash,
         argv.explorerApiKey,
-        argv.discordWebhookUrl,
+        argv.webhookUrl,
         argv.githubToken,
         argv.storeAbi
       );
@@ -130,7 +130,7 @@ async function runDeploy(
   constructorArgs: (string | number)[] | undefined,
   salt: string,
   explorerApiKey: string | undefined,
-  discordWebhookUrl: string | undefined,
+  webhookUrl: string | undefined,
   githubToken: string | undefined,
   storeAbi: boolean
 ) {
@@ -184,13 +184,13 @@ async function runDeploy(
     const newAbiPath = `${abiDir}/v${newDeploy.version.replace(/\./g, "_")}.json`;
     if (!fs.existsSync(newAbiPath)) {
       fs.writeFileSync(newAbiPath, JSON.stringify(contractJson.abi, null, 2));
-      if (discordWebhookUrl && githubToken) {
-        await notifyAbiChanges(contract, newDeploy.version, chainId, newDeploy.address, discordWebhookUrl, githubToken);
+      if (webhookUrl && githubToken) {
+        await notifyAbiChanges(contract, newDeploy.version, chainId, newDeploy.address, webhookUrl, githubToken);
       } else {
-        console.log("Skipping ABI change notification: GitHub token or Discord webhook URL not provided.");
+        console.log("Skipping ABI change notification: GitHub token or webhook URL not provided.");
       }
     } else {
-      console.log(`No new ABI changes detected for ${contract}. Skipping diff generation and Discord notification.`);
+      console.log(`No new ABI changes detected for ${contract}. Skipping diff generation and webhook notification.`);
     }
   } else {
     console.log("Skipping writing ABIs.");
@@ -559,7 +559,7 @@ function getLatestCommitHash(): string {
 }
 
 /**
- * Notifies the team of ABI changes via Discord
+ * Notifies the team of ABI changes via webhook
  * @param contract Name of the contract
  * @param newVersion New version of the contract
  * @param chainId Chain ID of the network
@@ -570,7 +570,7 @@ async function notifyAbiChanges(
   newVersion: string,
   chainId: string,
   contractAddress: string,
-  discordWebhookUrl: string,
+  webhookUrl: string,
   githubToken: string
 ) {
   newVersion = newVersion.startsWith("v") ? newVersion : `v${newVersion}`;
@@ -606,13 +606,13 @@ async function notifyAbiChanges(
     detailedDiff += lines + "\n";
   });
 
-  // Upload to GitHub Gist and send Discord message
+  // Upload to GitHub Gist and send webhook message
   try {
     const description = `The ABI changes for ${contract}.sol between ${oldVersion} and ${newVersion}.`;
     const gistUrl = await uploadToGist(detailedDiff, `${contract}_ABI_${oldVersion}_to_${newVersion}.diff`, description, githubToken);
     console.log(`ABI diff for ${contract} uploaded to: ${gistUrl}`);
 
-    await sendDiscordMessage(contract, oldVersion, newVersion, gistUrl, chainId, contractAddress, discordWebhookUrl);
+    await sendWebhookMessage(contract, oldVersion, newVersion, gistUrl, chainId, contractAddress, webhookUrl);
   } catch (error) {
     console.error("Error in notifying ABI changes:", error);
   }
@@ -646,14 +646,14 @@ async function uploadToGist(content: string, filename: string, description: stri
   }
 }
 
-async function sendDiscordMessage(
+async function sendWebhookMessage(
   contract: string,
   oldVersion: string,
   newVersion: string,
   gistUrl: string,
   chainId: string,
   contractAddress: string,
-  discordWebhookUrl: string
+  webhookUrl: string
 ) {
   const message = {
     embeds: [
@@ -684,12 +684,12 @@ async function sendDiscordMessage(
   };
 
   try {
-    const response = await axios.post(discordWebhookUrl, message);
-    console.log(`Discord message sent for ${contract} ABI changes.`);
+    const response = await axios.post(webhookUrl, message);
+    console.log(`Webhook message sent for ${contract} ABI changes.`);
     return response.data;
   } catch (error) {
     console.error(
-      "Error sending Discord message:",
+      "Error sending webhook message:",
       axios.isAxiosError(error) && error.response
         ? `${error.response.status} ${error.response.statusText}\nResponse data: ${JSON.stringify(error.response.data)}`
         : error,
