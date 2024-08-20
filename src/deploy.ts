@@ -13,6 +13,7 @@ import { ethers } from "ethers";
 import crypto from "crypto";
 import * as diff from "diff";
 import axios from "axios";
+import semver from 'semver';
 
 const CROSS_CHAIN_CREATE2_FACTORY =
   "0x0000000000FFe8B47B3e2130213B802212439497";
@@ -575,7 +576,11 @@ async function notifyAbiChanges(
   newVersion = newVersion.startsWith("v") ? newVersion : `v${newVersion}`;
 
   const abiDir = `deployments/abi/${contract}`;
-  const files = fs.readdirSync(abiDir).sort();
+  const files = fs.readdirSync(abiDir).sort((a, b) => {
+    const versionA = a.replace(/^v/, '').replace(/\_/g, '.');
+    const versionB = b.replace(/^v/, '').replace(/\_/g, '.');
+    return semver.compare(versionA, versionB);
+  });
 
   if (files.length < 2) {
     console.log(`No previous version found for ${contract}. Skipping diff generation and notification.`);
