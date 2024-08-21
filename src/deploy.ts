@@ -382,7 +382,7 @@ function writeDeploy(contract: string, deploy: Deploy, chainId: string) {
   existingDeployments.contracts[contract].deploys.push(deploy);
   fs.writeFileSync(
     `deployments/${chainId}.json`,
-    JSON.stringify(existingDeployments),
+    JSON.stringify(existingDeployments, null, 2),
   );
 }
 
@@ -525,7 +525,7 @@ function initProject(chainId: string) {
     fs.mkdirSync("deployments");
   }
 
-  fs.writeFileSync(`deployments/${chainId}.json`, JSON.stringify(fileToStore));
+  fs.writeFileSync(`deployments/${chainId}.json`, JSON.stringify(fileToStore, null, 2));
 }
 
 /**
