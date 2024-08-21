@@ -306,15 +306,31 @@ function validateDeploy(contract: string, deploy: Deploy, chainId: string) {
     const latestDeploy: Deploy =
       existingDeployments.contracts[contract].deploys.at(-1);
 
+    if (
+      latestDeploy.version.split(".")[0] == "0" &&
+      deploy.version == "1.0.0"
+    ) {
+      // Allow upgrade to alpha version
+      return;
+    }
+
     if (latestDeploy.abiHash != deploy.abiHash) {
-      const expectedVersion = `${Number(latestDeploy.version.split(".")[0]) + 1}.0.0`;
+      let expectedVersion = `${Number(latestDeploy.version.split(".")[0]) + 1}.0.0`;
+      if (latestDeploy.version.split(".")[0] == "0") {
+        // If in beta, we consider an abi update a minor change
+        expectedVersion = `0.${Number(latestDeploy.version.split(".")[1]) + 1}.0`;
+      }
       if (expectedVersion != deploy.version) {
         throw new Error(
           `Contract ${contract} version ${deploy.version} must increment major version due to ABI change. Expected version is ${expectedVersion}.`,
         );
       }
     } else if (latestDeploy.bytecodeHash != deploy.bytecodeHash) {
-      const expectedVersion = `${latestDeploy.version.split(".")[0]}.${Number(latestDeploy.version.split(".")[1]) + 1}.0`;
+      let expectedVersion = `${latestDeploy.version.split(".")[0]}.${Number(latestDeploy.version.split(".")[1]) + 1}.0`;
+      if (expectedVersion.split(".")[0] == "0") {
+        // If in beta, we will consider bytecode changes a patch update
+        expectedVersion = `0.${latestDeploy.version.split(".")[1]}.${Number(latestDeploy.version.split(".")[2]) + 1}`;
+      }
       if (expectedVersion != deploy.version) {
         throw new Error(
           `Contract ${contract} version ${deploy.version} must increment minor version due to bytecode change. Expected version is ${expectedVersion}.`,
@@ -483,7 +499,10 @@ function initProject(chainId: string) {
     fs.mkdirSync("deployments");
   }
 
-  fs.writeFileSync(`deployments/${chainId}.json`, JSON.stringify(fileToStore, null, 2));
+  fs.writeFileSync(
+    `deployments/${chainId}.json`,
+    JSON.stringify(fileToStore, null, 2),
+  );
 }
 
 /**
