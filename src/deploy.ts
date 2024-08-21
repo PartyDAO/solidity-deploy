@@ -174,6 +174,32 @@ async function runDeploy(
     .digest('hex')
   newDeploy.commitHash = getLatestCommitHash()
 
+  validateDeploy(contract, newDeploy, chainId)
+
+  console.log('Deploying contract...')
+
+  const getDeterministicAddressCall = `cast call ${CROSS_CHAIN_CREATE2_FACTORY} "findCreate2Address(bytes32,bytes)" ${salt} ${deploymentBytecode} --rpc-url ${rpcUrl}`
+  const deterministicCreateCall = `cast send ${CROSS_CHAIN_CREATE2_FACTORY} "safeCreate2(bytes32,bytes)" ${salt} ${deploymentBytecode} --rpc-url ${rpcUrl} --private-key ${privateKey}`
+
+  const getAddrResult = (await execSync(getDeterministicAddressCall))
+    .toString()
+    .trim()
+  const addr = ethers.AbiCoder.defaultAbiCoder().decode(
+    ['address'],
+    getAddrResult
+  )[0]
+  if (addr == ethers.ZeroAddress) {
+    throw new Error(
+      `Contract ${contract} already deployed using salt ${salt} with version ${newDeploy.version}`
+    )
+  }
+  newDeploy.address = addr
+
+  await execSync(deterministicCreateCall)
+  console.log(
+    `Contract ${contract} deployed to ${newDeploy.address} with version ${newDeploy.version} (commit ${newDeploy.commitHash})`
+  )
+
   if (storeAbi) {
     // Store ABI file and generate diff
     const abiDir = `deployments/abi/${contract}`
@@ -183,12 +209,16 @@ async function runDeploy(
     const newAbiPath = `${abiDir}/v${newDeploy.version.replace(/\./g, '_')}.json`
     if (!fs.existsSync(newAbiPath)) {
       fs.writeFileSync(newAbiPath, JSON.stringify(contractJson.abi, null, 2))
+      const abiFiles = fs.readdirSync(abiDir)
+      const versions = sortVersions(
+        abiFiles
+          .map((file) => file.match(/\d+\_\d+\_\d+/)?.[0] || '')
+          .filter(Boolean)
+      )
 
       // Check if there's a previous version
-      const previousVersions = sortVersions(fs.readdirSync(abiDir))
-
-      if (previousVersions.length > 1) {
-        const previousAbiPath = `${abiDir}/${previousVersions[1]}`
+      if (versions.length > 0) {
+        const previousAbiPath = `${abiDir}/v${versions[1].replace(/\./g, '_')}.json`
         const newAbi = JSON.parse(fs.readFileSync(newAbiPath, 'utf-8'))
         const previousAbi = JSON.parse(
           fs.readFileSync(previousAbiPath, 'utf-8')
@@ -196,7 +226,7 @@ async function runDeploy(
 
         if (JSON.stringify(newAbi) !== JSON.stringify(previousAbi)) {
           if (webhookUrl && githubToken) {
-            const previousVersion = previousVersions[1]
+            const previousVersion = versions[1]
               .split('.')[0]
               .replace(/\_/g, '.')
             await notifyAbiChanges(
@@ -233,32 +263,6 @@ async function runDeploy(
   } else {
     console.log('Skipping writing ABIs.')
   }
-
-  validateDeploy(contract, newDeploy, chainId)
-
-  console.log('Deploying contract...')
-
-  const getDeterministicAddressCall = `cast call ${CROSS_CHAIN_CREATE2_FACTORY} "findCreate2Address(bytes32,bytes)" ${salt} ${deploymentBytecode} --rpc-url ${rpcUrl}`
-  const deterministicCreateCall = `cast send ${CROSS_CHAIN_CREATE2_FACTORY} "safeCreate2(bytes32,bytes)" ${salt} ${deploymentBytecode} --rpc-url ${rpcUrl} --private-key ${privateKey}`
-
-  const getAddrResult = (await execSync(getDeterministicAddressCall))
-    .toString()
-    .trim()
-  const addr = ethers.AbiCoder.defaultAbiCoder().decode(
-    ['address'],
-    getAddrResult
-  )[0]
-  if (addr == ethers.ZeroAddress) {
-    throw new Error(
-      `Contract ${contract} already deployed using salt ${salt} with version ${newDeploy.version}`
-    )
-  }
-  newDeploy.address = addr
-
-  await execSync(deterministicCreateCall)
-  console.log(
-    `Contract ${contract} deployed to ${newDeploy.address} with version ${newDeploy.version} (commit ${newDeploy.commitHash})`
-  )
 
   if (!!explorerApiKey) {
     await verifyContract(rpcUrl, explorerApiKey, newDeploy, contract)
@@ -370,31 +374,15 @@ function validateDeploy(contract: string, deploy: Deploy, chainId: string) {
     const latestDeploy: Deploy =
       existingDeployments.contracts[contract].deploys.at(-1)
 
-    if (
-      latestDeploy.version.split('.')[0] == '0' &&
-      deploy.version == '1.0.0'
-    ) {
-      // Allow upgrade to alpha version
-      return
-    }
-
     if (latestDeploy.abiHash != deploy.abiHash) {
-      let expectedVersion = `${Number(latestDeploy.version.split('.')[0]) + 1}.0.0`
-      if (latestDeploy.version.split('.')[0] == '0') {
-        // If in beta, we consider an abi update a minor change
-        expectedVersion = `0.${Number(latestDeploy.version.split('.')[1]) + 1}.0`
-      }
+      const expectedVersion = `${Number(latestDeploy.version.split('.')[0]) + 1}.0.0`
       if (expectedVersion != deploy.version) {
         throw new Error(
           `Contract ${contract} version ${deploy.version} must increment major version due to ABI change. Expected version is ${expectedVersion}.`
         )
       }
     } else if (latestDeploy.bytecodeHash != deploy.bytecodeHash) {
-      let expectedVersion = `${latestDeploy.version.split('.')[0]}.${Number(latestDeploy.version.split('.')[1]) + 1}.0`
-      if (expectedVersion.split('.')[0] == '0') {
-        // If in beta, we will consider bytecode changes a patch update
-        expectedVersion = `0.${latestDeploy.version.split('.')[1]}.${Number(latestDeploy.version.split('.')[2]) + 1}`
-      }
+      const expectedVersion = `${latestDeploy.version.split('.')[0]}.${Number(latestDeploy.version.split('.')[1]) + 1}.0`
       if (expectedVersion != deploy.version) {
         throw new Error(
           `Contract ${contract} version ${deploy.version} must increment minor version due to bytecode change. Expected version is ${expectedVersion}.`
