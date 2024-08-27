@@ -224,11 +224,13 @@ async function runDeploy(
           fs.readFileSync(previousAbiPath, 'utf-8')
         )
 
+        // Check if the ABI has changed
         if (JSON.stringify(newAbi) !== JSON.stringify(previousAbi)) {
           if (webhookUrl && githubToken) {
             const previousVersion = versions[1]
               .split('.')[0]
               .replace(/\_/g, '.')
+            // Send notification for the ABI changes
             await notifyAbiChanges(
               contract,
               previousVersion,
@@ -246,9 +248,16 @@ async function runDeploy(
             )
           }
         } else {
-          console.log(
-            `No ABI changes detected for ${contract}. Skipping diff generation and webhook notification.`
-          )
+          // Send notification for new deployment (ABI unchanged)
+          if (webhookUrl) {
+            await notifyNewDeploy(
+              contract,
+              newDeploy.version,
+              newDeploy.address,
+              chainId,
+              webhookUrl
+            )
+          }
         }
       } else {
         console.log(
@@ -260,8 +269,6 @@ async function runDeploy(
         `ABI file already exists for ${contract} v${newDeploy.version}. Skipping writing and notification.`
       )
     }
-  } else {
-    console.log('Skipping writing ABIs.')
   }
 
   if (!!explorerApiKey) {
@@ -398,6 +405,11 @@ function validateDeploy(contract: string, deploy: Deploy, chainId: string) {
       if (expectedVersion.split('.')[0] == '0') {
         // If in beta, we will consider bytecode changes a patch update
         expectedVersion = `0.${latestDeploy.version.split('.')[1]}.${Number(latestDeploy.version.split('.')[2]) + 1}`
+      }
+      if (expectedVersion != deploy.version) {
+        throw new Error(
+          `Contract ${contract} version ${deploy.version} must increment minor version due to bytecode change. Expected version is ${expectedVersion}.`
+        )
       }
     }
   }
@@ -659,17 +671,89 @@ async function notifyAbiChanges(
     )
     console.log(`ABI diff for ${contract} uploaded to: ${gistUrl}`)
 
-    await sendWebhookMessage(
-      contract,
-      previousVersion,
-      newVersion,
-      gistUrl,
-      chainId,
-      contractAddress,
-      webhookUrl
-    )
+    const message = {
+      embeds: [
+        {
+          title: `ABI Changes: ${contract} ${previousVersion} → ${newVersion}`,
+          description: `A new version of \`${contract}.sol\` with ABI changes has been deployed.`,
+          color: 3447003,
+          fields: [
+            {
+              name: 'Version',
+              value: `${previousVersion} → ${newVersion}`,
+            },
+            {
+              name: 'Chain',
+              value: `${getNetworkName(chainId)}`,
+            },
+            {
+              name: 'Address',
+              value: `${contractAddress}`,
+            },
+            {
+              name: 'ABI Changes',
+              value: `[View diff on GitHub](${gistUrl})`,
+            },
+          ],
+        },
+      ],
+    }
+
+    await sendWebhookMessage('ABI Changes', webhookUrl, message)
   } catch (error) {
     console.error('Error in notifying ABI changes:', error)
+  }
+}
+
+async function notifyNewDeploy(
+  contract: string,
+  version: string,
+  chainId: string,
+  contractAddress: string,
+  webhookUrl: string
+) {
+  const networkName = getNetworkName(chainId)
+  const explorerUrl = getExplorerUrl(chainId)
+
+  try {
+    const message = {
+      embeds: [
+        {
+          title: `New Deployment: ${contract} ${version}`,
+          description: `A new \`${contract}.sol\` \`${version}\` has been deployed on ${networkName}.`,
+          color: 3447003,
+          fields: [
+            {
+              name: 'Version',
+              value: version,
+              inline: true,
+            },
+            {
+              name: 'Chain',
+              value: networkName,
+              inline: true,
+            },
+            {
+              name: 'Address',
+              value: explorerUrl
+                ? `[${contractAddress}](${explorerUrl}/address/${contractAddress})`
+                : contractAddress,
+            },
+          ],
+        },
+      ],
+    }
+
+    const response = await axios.post(webhookUrl, message)
+
+    return response.data
+  } catch (error) {
+    console.error('Error sending new address notification:', error)
+    if (axios.isAxiosError(error) && error.response) {
+      console.error(
+        `Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`
+      )
+    }
   }
 }
 
@@ -707,49 +791,17 @@ async function uploadToGist(
 }
 
 async function sendWebhookMessage(
-  contract: string,
-  previousVersion: string,
-  newVersion: string,
-  gistUrl: string,
-  chainId: string,
-  contractAddress: string,
-  webhookUrl: string
+  purpose: string,
+  webhookUrl: string,
+  message: any
 ) {
-  const message = {
-    embeds: [
-      {
-        title: `ABI Changes: ${contract} ${previousVersion} → ${newVersion}`,
-        description: `A new version of \`${contract}.sol\` with ABI changes has been deployed.`,
-        color: 3447003,
-        fields: [
-          {
-            name: 'Version',
-            value: `${previousVersion} → ${newVersion}`,
-          },
-          {
-            name: 'Chain',
-            value: `${getNetworkName(chainId)}`,
-          },
-          {
-            name: 'Address',
-            value: `${contractAddress}`,
-          },
-          {
-            name: 'ABI Changes',
-            value: `[View diff on GitHub](${gistUrl})`,
-          },
-        ],
-      },
-    ],
-  }
-
   try {
     const response = await axios.post(webhookUrl, message)
-    console.log(`Webhook message sent for ${contract} ABI changes.`)
+    console.log(`Webhook message sent for ${purpose}.`)
     return response.data
   } catch (error) {
     console.error(
-      'Error sending webhook message:',
+      `Error sending webhook message for ${purpose}:`,
       axios.isAxiosError(error) && error.response
         ? `${error.response.status} ${error.response.statusText}\nResponse data: ${JSON.stringify(error.response.data)}`
         : error
@@ -773,6 +825,23 @@ function getNetworkName(chainId: string): string {
       return 'Localhost'
     default:
       return chainId.toString()
+  }
+}
+
+function getExplorerUrl(chainId: string): string {
+  switch (chainId) {
+    case '1':
+      return 'https://etherscan.io/'
+    case '11155111':
+      return 'https://sepolia.etherscan.io/'
+    case '8453':
+      return 'https://basescan.org/'
+    case '84532':
+      return 'https://sepolia.basescan.org/'
+    case '7777777':
+      return 'https://explorer.zora.energy/'
+    default:
+      return ''
   }
 }
 
