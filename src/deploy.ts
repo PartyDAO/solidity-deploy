@@ -744,16 +744,9 @@ async function notifyNewDeploy(
       ],
     }
 
-    const response = await axios.post(webhookUrl, message)
-
-    return response.data
+    await sendWebhookMessage('New Deployment', webhookUrl, message)
   } catch (error) {
     console.error('Error sending new address notification:', error)
-    if (axios.isAxiosError(error) && error.response) {
-      console.error(
-        `Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`
-      )
-    }
   }
 }
 
