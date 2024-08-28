@@ -709,7 +709,7 @@ async function notifyNewDeploy(
   contract: string,
   version: string,
   chainId: string,
-  contractAddress: string,
+  address: string,
   webhookUrl: string
 ) {
   const networkName = getNetworkName(chainId)
@@ -736,8 +736,8 @@ async function notifyNewDeploy(
             {
               name: 'Address',
               value: explorerUrl
-                ? `[${contractAddress}](${explorerUrl}/address/${contractAddress})`
-                : contractAddress,
+                ? `[${address}](${explorerUrl}/address/${address})`
+                : address,
             },
           ],
         },
