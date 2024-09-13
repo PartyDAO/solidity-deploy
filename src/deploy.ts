@@ -11,6 +11,9 @@ import {
 } from 'child_process'
 import { ethers } from 'ethers'
 import crypto from 'crypto'
+import * as diff from 'diff'
+import axios from 'axios'
+import semver from 'semver'
 
 const CROSS_CHAIN_CREATE2_FACTORY = '0x0000000000FFe8B47B3e2130213B802212439497'
 
@@ -33,12 +36,19 @@ yargs(hideBin(process.argv))
           'explorer-api-key',
           'Explorer key for etherscan product on the given network'
         )
+        .describe('webhook-url', 'Webhook URL for notifications')
+        .describe('github-token', 'GitHub token for creating gists')
+        .describe('store-abi', 'Store the ABI file for the deployed contract')
         .array('constructor-args')
         .string('constructor-args')
         .string('pk')
         .string('rpc')
         .string('salt')
         .string('explorer-api-key')
+        .string('webhook-url')
+        .string('github-token')
+        .boolean('store-abi')
+        .default('store-abi', false)
         .demandOption(['rpc', 'pk'])
     },
     (argv) => {
@@ -48,7 +58,10 @@ yargs(hideBin(process.argv))
         argv.pk,
         argv['constructor-args'],
         argv.salt ?? ethers.ZeroHash,
-        argv.explorerApiKey
+        argv.explorerApiKey,
+        argv.webhookUrl,
+        argv.githubToken,
+        argv.storeAbi
       )
     }
   )
@@ -115,7 +128,10 @@ async function runDeploy(
   privateKey: string,
   constructorArgs: (string | number)[] | undefined,
   salt: string,
-  explorerApiKey: string | undefined
+  explorerApiKey: string | undefined,
+  webhookUrl: string | undefined,
+  githubToken: string | undefined,
+  storeAbi: boolean
 ) {
   const contracts = getProjectContracts()
   if (!contracts.includes(contract)) {
@@ -136,14 +152,12 @@ async function runDeploy(
   )
   let newDeploy: Deploy = { deployedArgs: encodedConstructorArgs } as Deploy
 
+  const contractJson = JSON.parse(
+    fs.readFileSync(`out/${contract}.sol/${contract}.json`, 'utf-8')
+  )
   const deploymentBytecode = ethers.solidityPacked(
     ['bytes', 'bytes'],
-    [
-      JSON.parse(
-        fs.readFileSync(`out/${contract}.sol/${contract}.json`, 'utf-8')
-      ).bytecode.object,
-      encodedConstructorArgs,
-    ]
+    [contractJson.bytecode.object, encodedConstructorArgs]
   )
   newDeploy.version = await getUndeployedContractVersion(
     deploymentBytecode,
@@ -152,24 +166,13 @@ async function runDeploy(
 
   newDeploy.bytecodeHash = crypto
     .createHash('sha256')
-    .update(
-      JSON.stringify(
-        JSON.parse(
-          fs.readFileSync(`out/${contract}.sol/${contract}.json`, 'utf-8')
-        ).bytecode.object
-      )
-    )
+    .update(JSON.stringify(contractJson.bytecode.object))
     .digest('hex')
   newDeploy.abiHash = crypto
     .createHash('sha256')
-    .update(
-      JSON.stringify(
-        JSON.parse(
-          fs.readFileSync(`out/${contract}.sol/${contract}.json`, 'utf-8')
-        ).abi
-      )
-    )
+    .update(JSON.stringify(contractJson.abi))
     .digest('hex')
+  newDeploy.commitHash = getLatestCommitHash()
 
   validateDeploy(contract, newDeploy, chainId)
 
@@ -194,8 +197,79 @@ async function runDeploy(
 
   await execSync(deterministicCreateCall)
   console.log(
-    `Contract ${contract} deployed to ${newDeploy.address} with version ${newDeploy.version}`
+    `Contract ${contract} deployed to ${newDeploy.address} with version ${newDeploy.version} (commit ${newDeploy.commitHash})`
   )
+
+  if (storeAbi) {
+    // Store ABI file and generate diff
+    const abiDir = `deployments/abi/${contract}`
+    if (!fs.existsSync(abiDir)) {
+      fs.mkdirSync(abiDir, { recursive: true })
+    }
+    const newAbiPath = `${abiDir}/v${newDeploy.version.replace(/\./g, '_')}.json`
+    if (!fs.existsSync(newAbiPath)) {
+      fs.writeFileSync(newAbiPath, JSON.stringify(contractJson.abi, null, 2))
+      const abiFiles = fs.readdirSync(abiDir)
+      const versions = sortVersions(
+        abiFiles
+          .map((file) => file.match(/\d+\_\d+\_\d+/)?.[0] || '')
+          .filter(Boolean)
+      )
+
+      // Check if there's a previous version
+      if (versions.length > 1) {
+        const previousAbiPath = `${abiDir}/v${versions[1].replace(/\./g, '_')}.json`
+        const newAbi = JSON.parse(fs.readFileSync(newAbiPath, 'utf-8'))
+        const previousAbi = JSON.parse(
+          fs.readFileSync(previousAbiPath, 'utf-8')
+        )
+
+        // Check if the ABI has changed
+        if (JSON.stringify(newAbi) !== JSON.stringify(previousAbi)) {
+          if (webhookUrl && githubToken) {
+            const previousVersion = versions[1]
+              .split('.')[0]
+              .replace(/\_/g, '.')
+            // Send notification for the ABI changes
+            await notifyAbiChanges(
+              contract,
+              previousVersion,
+              newDeploy.version,
+              previousAbi,
+              newAbi,
+              chainId,
+              newDeploy.address,
+              webhookUrl,
+              githubToken
+            )
+          } else {
+            console.log(
+              'Skipping ABI change notification: GitHub token or webhook URL not provided.'
+            )
+          }
+        } else {
+          // Send notification for new deployment (ABI unchanged)
+          if (webhookUrl) {
+            await notifyNewDeploy(
+              contract,
+              newDeploy.version,
+              newDeploy.address,
+              chainId,
+              webhookUrl
+            )
+          }
+        }
+      } else {
+        console.log(
+          `First version of ABI for ${contract}. Skipping diff generation and webhook notification.`
+        )
+      }
+    } else {
+      console.log(
+        `ABI file already exists for ${contract} v${newDeploy.version}. Skipping writing and notification.`
+      )
+    }
+  }
 
   if (!!explorerApiKey) {
     await verifyContract(rpcUrl, explorerApiKey, newDeploy, contract)
@@ -237,7 +311,9 @@ function resolveConstructorArgs(
   chainId: string
 ): string[] {
   if (!fs.existsSync(`deployments/${chainId}.json`)) {
-    throw new Error(`Deployment file for network ${chainId} does not exist`)
+    throw new Error(
+      `Deployment file for network ${getNetworkName(chainId)} does not exist`
+    )
   }
   const deploymentFile: DeploymentFile = JSON.parse(
     fs.readFileSync(`deployments/${chainId}.json`, 'utf-8')
@@ -460,6 +536,7 @@ type Deploy = {
   address: string
   deployedArgs: string
   abiHash: string
+  commitHash: string
   bytecodeHash: string
 }
 type Contract = {
@@ -479,7 +556,9 @@ function initProject(chainId: string) {
   console.log(`Initializing project for network ${chainId}...`)
 
   if (fs.existsSync(`deployments/${chainId}.json`)) {
-    throw new Error(`Deployment file for network ${chainId} already exists`)
+    throw new Error(
+      `Deployment file for network ${getNetworkName(chainId)} already exists`
+    )
   }
 
   let fileToStore: DeploymentFile = {
@@ -533,4 +612,236 @@ function getProjectContracts(): string[] {
   }
 
   return deployableContracts
+}
+
+/**
+ * Gets the latest commit hash
+ * @returns Commit hash
+ */
+function getLatestCommitHash(): string {
+  try {
+    return execSync('git rev-parse HEAD').toString().trim()
+  } catch (error) {
+    console.warn('Unable to get git commit hash. Is this a git repository?')
+    return 'unknown'
+  }
+}
+
+/**
+ * Notifies the team of ABI changes via webhook
+ * @param contract Name of the contract
+ * @param previousVersion Previous version of the contract
+ * @param newVersion New version of the contract
+ * @param previousAbi Previous ABI in JSON of the contract
+ * @param newAbi New ABI in JSON of the contract
+ * @param chainId Chain ID of the network
+ * @param contractAddress Address of the contract
+ */
+async function notifyAbiChanges(
+  contract: string,
+  previousVersion: string,
+  newVersion: string,
+  previousAbi: string,
+  newAbi: string,
+  chainId: string,
+  contractAddress: string,
+  webhookUrl: string,
+  githubToken: string
+) {
+  const differences = diff.diffJson(previousAbi, newAbi)
+
+  let detailedDiff = ''
+  differences.forEach((part) => {
+    const prefix = part.added ? '+' : part.removed ? '-' : ' '
+    const lines = part.value
+      .split('\n')
+      .map((line) => `${prefix} ${line}`)
+      .join('\n')
+    detailedDiff += lines + '\n'
+  })
+
+  // Upload to GitHub Gist and send webhook message
+  try {
+    const description = `The ABI changes for ${contract}.sol between ${previousVersion} and ${newVersion}.`
+    const gistUrl = await uploadToGist(
+      detailedDiff,
+      `${contract}_ABI_${previousVersion}_to_${newVersion}.diff`,
+      description,
+      githubToken
+    )
+    console.log(`ABI diff for ${contract} uploaded to: ${gistUrl}`)
+
+    const message = {
+      embeds: [
+        {
+          title: `ABI Changes: ${contract} ${previousVersion} → ${newVersion}`,
+          description: `A new version of \`${contract}.sol\` with ABI changes has been deployed.`,
+          color: 3447003,
+          fields: [
+            {
+              name: 'Version',
+              value: `${previousVersion} → ${newVersion}`,
+            },
+            {
+              name: 'Chain',
+              value: `${getNetworkName(chainId)}`,
+            },
+            {
+              name: 'Address',
+              value: `${contractAddress}`,
+            },
+            {
+              name: 'ABI Changes',
+              value: `[View diff on GitHub](${gistUrl})`,
+            },
+          ],
+        },
+      ],
+    }
+
+    await sendWebhookMessage('ABI Changes', webhookUrl, message)
+  } catch (error) {
+    console.error('Error in notifying ABI changes:', error)
+  }
+}
+
+async function notifyNewDeploy(
+  contract: string,
+  version: string,
+  chainId: string,
+  address: string,
+  webhookUrl: string
+) {
+  const networkName = getNetworkName(chainId)
+  const explorerUrl = getExplorerUrl(chainId)
+
+  try {
+    const message = {
+      embeds: [
+        {
+          title: `New Deployment: ${contract} ${version}`,
+          description: `A new \`${contract}.sol\` \`${version}\` has been deployed on ${networkName}.`,
+          color: 3447003,
+          fields: [
+            {
+              name: 'Version',
+              value: version,
+              inline: true,
+            },
+            {
+              name: 'Chain',
+              value: networkName,
+              inline: true,
+            },
+            {
+              name: 'Address',
+              value: explorerUrl
+                ? `[${address}](${explorerUrl}/address/${address})`
+                : address,
+            },
+          ],
+        },
+      ],
+    }
+
+    await sendWebhookMessage('New Deployment', webhookUrl, message)
+  } catch (error) {
+    console.error('Error sending new address notification:', error)
+  }
+}
+
+async function uploadToGist(
+  content: string,
+  filename: string,
+  description: string,
+  githubToken: string
+): Promise<string> {
+  try {
+    const response = await axios.post(
+      'https://api.github.com/gists',
+      {
+        files: {
+          [filename]: {
+            content: content,
+          },
+        },
+        description,
+        public: false,
+      },
+      {
+        headers: {
+          Authorization: `token ${githubToken}`,
+          Accept: 'application/vnd.github.v3+json',
+        },
+      }
+    )
+
+    return response.data.html_url
+  } catch (error) {
+    console.error('Error uploading to GitHub Gist:', error)
+    throw error
+  }
+}
+
+async function sendWebhookMessage(
+  purpose: string,
+  webhookUrl: string,
+  message: any
+) {
+  try {
+    const response = await axios.post(webhookUrl, message)
+    console.log(`Webhook message sent for ${purpose}.`)
+    return response.data
+  } catch (error) {
+    console.error(
+      `Error sending webhook message for ${purpose}:`,
+      axios.isAxiosError(error) && error.response
+        ? `${error.response.status} ${error.response.statusText}\nResponse data: ${JSON.stringify(error.response.data)}`
+        : error
+    )
+  }
+}
+
+function getNetworkName(chainId: string): string {
+  switch (chainId) {
+    case '1':
+      return 'Mainnet'
+    case '11155111':
+      return 'Sepolia'
+    case '8453':
+      return 'Base'
+    case '84532':
+      return 'Base Sepolia'
+    case '7777777':
+      return 'Zora'
+    case '1337':
+      return 'Localhost'
+    default:
+      return chainId.toString()
+  }
+}
+
+function getExplorerUrl(chainId: string): string {
+  switch (chainId) {
+    case '1':
+      return 'https://etherscan.io/'
+    case '11155111':
+      return 'https://sepolia.etherscan.io/'
+    case '8453':
+      return 'https://basescan.org/'
+    case '84532':
+      return 'https://sepolia.basescan.org/'
+    case '7777777':
+      return 'https://explorer.zora.energy/'
+    default:
+      return ''
+  }
+}
+
+function sortVersions(versions: string[]): string[] {
+  return versions.sort((a, b) => {
+    const versionA = a.replace(/^v/, '').replace(/\_/g, '.')
+    const versionB = b.replace(/^v/, '').replace(/\_/g, '.')
+    return semver.compare(versionB, versionA) // Descending order
+  })
 }
